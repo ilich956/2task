@@ -1,10 +1,30 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io/ioutil"
 	"net/http"
+
+	_ "github.com/lib/pq"
+)
+
+const (
+	port        = ":8080"
+	connStr     = "postgres://postgres:bayipket@localhost/adv_database?sslmode=disable"
+	driverName  = "postgres"
+	tableName   = "user_table"
+	createTable = `
+		CREATE TABLE IF NOT EXISTS user_table (
+			id SERIAL PRIMARY KEY,
+			name VARCHAR(255),
+			email VARCHAR(255),
+			username VARCHAR(255),
+			password VARCHAR(255)
+		);
+	`
 )
 
 type RegistrationData struct {
@@ -20,40 +40,76 @@ type ResponseData struct {
 	Message string `json:"message"`
 }
 
-const port = ":8080"
+var db *sql.DB
 
 func main() {
+	var err error
+	db, err = sql.Open(driverName, connStr)
+	if err != nil {
+		fmt.Println("Error opening database:", err)
+		return
+	}
+	defer db.Close()
+
+	_, err = db.Exec(createTable)
+	if err != nil {
+		fmt.Println("Error creating user_table:", err)
+		return
+	}
+
 	http.HandleFunc("/register", handleRequest)
+	http.HandleFunc("/userList", handleGetRequest)
 	http.Handle("/", http.FileServer(http.Dir(".")))
 	fmt.Println("Server listening on port", port)
 	http.ListenAndServe(port, nil)
 }
 
 func handleRequest(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
+	if r.Method == http.MethodGet && r.URL.Path == "/userList" {
 		handleGetRequest(w, r)
-	case http.MethodPost:
-		handlePostRequest(w, r)
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
+	if r.Method == http.MethodPost {
+		handlePostRequest(w, r)
+		return
+	}
+	http.Error(w, "Method not all", http.StatusMethodNotAllowed)
 }
 
 func handleGetRequest(w http.ResponseWriter, r *http.Request) {
-	response := ResponseData{
-		Status:  "success",
-		Message: "GET request received",
-	}
-
-	responseJSON, err := json.Marshal(response)
+	users, err := getFromDB()
 	if err != nil {
-		http.Error(w, "Error", http.StatusInternalServerError)
+		http.Error(w, "Status", http.StatusInternalServerError)
 		return
 	}
+	ts, err := template.ParseFiles("userList.html")
+	if err != nil {
+		http.Error(w, "Loh", http.StatusInternalServerError)
+		return
+	}
+	ts.Execute(w, users)
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(responseJSON)
+}
+
+func getFromDB() ([]RegistrationData, error) {
+	rows, err := db.Query(`SELECT "username","password" FROM user_table`)
+	if err != nil {
+		return nil, fmt.Errorf("Error querying database: %s", err)
+	}
+	defer rows.Close()
+
+	var users []RegistrationData
+
+	for rows.Next() {
+		var u RegistrationData
+		err := rows.Scan(&u.Username, &u.Password)
+		if err != nil {
+			return nil, fmt.Errorf("Error scanning row: %s", err)
+		}
+		users = append(users, u)
+	}
+	fmt.Print(users)
+	return users, nil
 }
 
 func handlePostRequest(w http.ResponseWriter, r *http.Request) {
@@ -75,11 +131,18 @@ func handlePostRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Insert user registration data into the database
+	err = insertUser(registrationData)
+	if err != nil {
+		handleError(w, "Error inserting user data into the database")
+		return
+	}
+
 	fmt.Printf("Received registration data: %+v\n", registrationData)
 
 	response := ResponseData{
 		Status:  "success",
-		Message: "Registration data successfully received",
+		Message: "Registration data successfully received and inserted into the database",
 	}
 
 	responseJSON, err := json.Marshal(response)
@@ -90,6 +153,12 @@ func handlePostRequest(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(responseJSON)
+}
+
+func insertUser(data RegistrationData) error {
+	_, err := db.Exec("INSERT INTO "+tableName+" (name, email, username, password) VALUES ($1, $2, $3, $4)",
+		data.Name, data.Email, data.Username, data.Password)
+	return err
 }
 
 func handleError(w http.ResponseWriter, message string) {
